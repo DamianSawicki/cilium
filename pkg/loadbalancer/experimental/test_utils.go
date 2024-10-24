@@ -417,15 +417,17 @@ func CheckTables(db *statedb.DB, writer *Writer, svcs []*slim_corev1.Service, ep
 				if be.Instances.Len() != 1 {
 					err = errors.Join(err, fmt.Errorf("Incorrect instances count for backend #%06d, got %v, want %v", i, be.Instances.Len(), 1))
 				} else {
-					for svcName, instance := range be.Instances.All() { // There should
-						if svcName.Name != svcs[i].Name {
-							err = errors.Join(err, fmt.Errorf("Incorrect service name for backend #%06d, got %v, want %v", i, svcName.Name, svcs[i].Name))
-						}
-						if state, tmpErr := instance.State.String(); tmpErr != nil || state != "active" {
-							err = errors.Join(err, fmt.Errorf("Incorrect state for backend #%06d, got %q, want %q", i, state, "active"))
-						}
-						if instance.PortName != svcs[i].Spec.Ports[0].Name {
-							err = errors.Join(err, fmt.Errorf("Incorrect instance port name for backend #%06d, got %q, want %q", i, instance.PortName, svcs[i].Spec.Ports[0].Name))
+					for svcName, instances := range be.Instances.All() { // There should
+						for _, instance := range instances {
+							if svcName.Name != svcs[i].Name {
+								err = errors.Join(err, fmt.Errorf("Incorrect service name for backend #%06d, got %v, want %v", i, svcName.Name, svcs[i].Name))
+							}
+							if state, tmpErr := instance.State.String(); tmpErr != nil || state != "active" {
+								err = errors.Join(err, fmt.Errorf("Incorrect state for backend #%06d, got %q, want %q", i, state, "active"))
+							}
+							if instance.PortName != svcs[i].Spec.Ports[0].Name {
+								err = errors.Join(err, fmt.Errorf("Incorrect instance port name for backend #%06d, got %q, want %q", i, instance.PortName, svcs[i].Spec.Ports[0].Name))
+							}
 						}
 					}
 				}

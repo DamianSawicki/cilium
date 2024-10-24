@@ -244,17 +244,26 @@ func getBackendsForFrontend(txn statedb.ReadTxn, tbl statedb.Table[*Backend], fe
 		if fe.PortName != "" {
 			// A backend with specific port name requested. Look up what this backend
 			// is called for this service.
-			instance, found := be.Instances.Get(fe.ServiceName)
+			instances, found := be.Instances.Get(fe.ServiceName)
 			if !found {
 				continue
 			}
-			if string(fe.PortName) != instance.PortName {
+			if !portNameFound(instances, string(fe.PortName)) {
 				continue
 			}
 		}
 		out = append(out, BackendWithRevision{be, rev})
 	}
 	return out
+}
+
+func portNameFound(instances []BackendInstance, portName string) bool {
+	for _, instance := range instances {
+		if portName == instance.PortName {
+			return true
+		}
+	}
+	return false
 }
 
 func (w *Writer) DeleteServiceAndFrontends(txn WriteTxn, name loadbalancer.ServiceName) error {
@@ -332,7 +341,10 @@ func (w *Writer) SetBackends(txn WriteTxn, name loadbalancer.ServiceName, source
 	}
 	orphans := statedb.Filter(
 		w.bes.List(txn, BackendByServiceName(name)),
-		func(be *Backend) bool { return !addrs.Has(be.L3n4Addr) })
+		func(be *Backend) bool {
+			instances, _ := be.Instances.Get(name)
+			return sourceOccurs(instances, source) && !addrs.Has(be.L3n4Addr)
+		})
 
 	refs, err := w.updateBackends(txn, name, source, bes)
 	if err != nil {
@@ -342,13 +354,8 @@ func (w *Writer) SetBackends(txn WriteTxn, name loadbalancer.ServiceName, source
 	// Release orphaned backends, e.g. all backends from this source referencing this
 	// service.
 	for orphan := range orphans {
-		for _, inst := range orphan.Instances.All() {
-			if inst.Source == source {
-				if err := w.removeBackendRef(txn, name, orphan); err != nil {
-					return err
-				}
-			}
-			break
+		if err := w.removeBackendRefPerSource(txn, name, orphan, source); err != nil {
+			return err
 		}
 	}
 
@@ -395,14 +402,16 @@ func (w *Writer) SetBackendHealth(txn WriteTxn, addr loadbalancer.L3n4Addr, heal
 // computed state and the state of all instances.
 func computeBackendState(be *Backend) loadbalancer.BackendState {
 	instanceState := loadbalancer.BackendStateActive
-	for _, instance := range be.Instances.All() {
-		// The only states accepted from the instances are Active, Terminating or Maintenance.
-		// Quarantined can only be set via SetBackendHealth.
-		switch instance.State {
-		case loadbalancer.BackendStateTerminating:
-			fallthrough
-		case loadbalancer.BackendStateMaintenance:
-			instanceState = instance.State
+	for _, instances := range be.Instances.All() {
+		for _, instance := range instances { // TODO: perhaps it makes more sense to use State from a preferred source than from all sources.
+			// The only states accepted from the instances are Active, Terminating or Maintenance.
+			// Quarantined can only be set via SetBackendHealth.
+			switch instance.State {
+			case loadbalancer.BackendStateTerminating:
+				fallthrough
+			case loadbalancer.BackendStateMaintenance:
+				instanceState = instance.State
+			}
 		}
 	}
 
@@ -435,15 +444,21 @@ func (w *Writer) updateBackends(txn WriteTxn, serviceName loadbalancer.ServiceNa
 			be.ZoneID = bep.ZoneID
 		}
 
-		be.Instances = be.Instances.Set(
-			serviceName,
-			BackendInstance{
-				PortName: bep.PortName,
-				Weight:   bep.Weight,
-				Source:   source,
-				State:    bep.State,
-			},
-		)
+		instances, _ := be.Instances.Get(serviceName)
+		var fromOtherSources []BackendInstance
+		for _, inst := range instances {
+			if inst.Source != source {
+				fromOtherSources = append(fromOtherSources, inst)
+			}
+		}
+		newInstances := append(fromOtherSources, BackendInstance{
+			PortName: bep.PortName,
+			Weight:   bep.Weight,
+			Source:   source,
+			State:    bep.State,
+		})
+
+		be.Instances = be.Instances.Set(serviceName, newInstances)
 
 		// Recompute the backend state with this new instance.
 		be.State = computeBackendState(&be)
@@ -464,10 +479,10 @@ func (w *Writer) DeleteBackendsBySource(txn WriteTxn, source source.Source) erro
 	// to always index by source.
 	names := sets.New[loadbalancer.ServiceName]()
 	for be := range w.bes.All(txn) {
-		for name, inst := range be.Instances.All() {
-			if inst.Source == source {
+		for name, instances := range be.Instances.All() {
+			if sourceOccurs(instances, source) {
 				names.Insert(name)
-				w.removeBackendRef(txn, name, be)
+				w.removeBackendRefPerSource(txn, name, be, source)
 			}
 		}
 	}
@@ -483,8 +498,27 @@ func (w *Writer) DeleteBackendsBySource(txn WriteTxn, source source.Source) erro
 	return nil
 }
 
+func sourceOccurs(instances []BackendInstance, source source.Source) bool {
+	for _, instance := range instances {
+		if instance.Source == source {
+			return true
+		}
+	}
+	return false
+}
+
 func (w *Writer) removeBackendRef(txn WriteTxn, name loadbalancer.ServiceName, be *Backend) (err error) {
 	be, orphan := be.release(name)
+	if orphan {
+		_, _, err = w.bes.Delete(txn, be)
+	} else {
+		_, _, err = w.bes.Insert(txn, be)
+	}
+	return err
+}
+
+func (w *Writer) removeBackendRefPerSource(txn WriteTxn, name loadbalancer.ServiceName, be *Backend, source source.Source) (err error) {
+	be, orphan := be.releasePerSource(name, source)
 	if orphan {
 		_, _, err = w.bes.Delete(txn, be)
 	} else {
@@ -507,11 +541,14 @@ func (w *Writer) ReleaseBackend(txn WriteTxn, name loadbalancer.ServiceName, add
 
 func (w *Writer) ReleaseBackendsFromSource(txn WriteTxn, name loadbalancer.ServiceName, source source.Source) error {
 	for be := range w.bes.List(txn, BackendByServiceName(name)) {
-		for instName, inst := range be.Instances.All() {
-			if inst.Source != source || instName != name {
+		for instName, instances := range be.Instances.All() {
+			if instName != name {
 				continue
 			}
-			if err := w.removeBackendRef(txn, name, be); err != nil {
+			if !sourceOccurs(instances, source) {
+				continue
+			}
+			if err := w.removeBackendRefPerSource(txn, name, be, source); err != nil {
 				return err
 			}
 			break

@@ -60,7 +60,7 @@ type Backend struct {
 	// Instances of this backend. A backend is always linked to a specific
 	// service and the instances may call the backend by different name
 	// (PortName) or they may come from  differents sources.
-	Instances part.Map[loadbalancer.ServiceName, BackendInstance]
+	Instances part.Map[loadbalancer.ServiceName, []BackendInstance]
 
 	// Properties are additional untyped properties that can carry feature
 	// specific metadata about the backend.
@@ -115,15 +115,17 @@ func (be *Backend) TableRow() []string {
 	}
 }
 
-func showInstances(instances part.Map[loadbalancer.ServiceName, BackendInstance]) string {
+func showInstances(instances part.Map[loadbalancer.ServiceName, []BackendInstance]) string {
 	var b strings.Builder
 	count := instances.Len()
-	for name, inst := range instances.All() {
+	for name, instances := range instances.All() {
 		b.WriteString(name.String())
-		if inst.PortName != "" {
-			b.WriteString(" (")
-			b.WriteString(string(inst.PortName))
-			b.WriteRune(')')
+		for _, inst := range instances {
+			if inst.PortName != "" {
+				b.WriteString(" (")
+				b.WriteString(string(inst.PortName))
+				b.WriteRune(')')
+			}
 		}
 		count--
 		if count > 0 {
@@ -150,6 +152,23 @@ func (be *Backend) serviceNameKeys() index.KeySet {
 func (be *Backend) release(name loadbalancer.ServiceName) (*Backend, bool) {
 	beCopy := *be
 	beCopy.Instances = beCopy.Instances.Delete(name)
+	return &beCopy, beCopy.Instances.Len() == 0
+}
+
+func (be *Backend) releasePerSource(name loadbalancer.ServiceName, source source.Source) (*Backend, bool) {
+	beCopy := *be
+	instances, _ := beCopy.Instances.Get(name)
+	var newInstances []BackendInstance
+	for _, instance := range instances {
+		if instance.Source != source {
+			newInstances = append(newInstances, instance)
+		}
+	}
+	if len(newInstances) > 0 {
+		beCopy.Instances = beCopy.Instances.Set(name, newInstances)
+	} else {
+		beCopy.Instances = beCopy.Instances.Delete(name)
+	}
 	return &beCopy, beCopy.Instances.Len() == 0
 }
 
