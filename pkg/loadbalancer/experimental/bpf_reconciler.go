@@ -557,7 +557,7 @@ func (ops *BPFOps) updateFrontend(fe *Frontend) error {
 	svcVal.SetRevNat(int(feID))
 
 	// Gather backends for the service
-	orderedBackends := sortedBackends(fe.Backends)
+	orderedBackends := sortedBackends(deduplicateInstances(svc, fe.Backends))
 
 	// Clean up any orphan backends to make room for new backends
 	backendAddrs := sets.New[loadbalancer.L3n4Addr]()
@@ -979,6 +979,28 @@ func sortedBackends(bes []BackendWithRevision) []BackendWithRevision {
 		}
 	})
 	return bes
+}
+
+func deduplicateInstances(svc *Service, backends []BackendWithRevision) []BackendWithRevision {
+	var ans []BackendWithRevision
+	for _, backend := range backends {
+		instances, found := backend.Instances.Get(svc.Name)
+		if !found {
+			panic("Not possible")
+		}
+		if len(instances) > 1 {
+			beCopy := backend.Backend
+			for _, inst := range instances {
+				if inst.Source == svc.Source { // This is just an example, we can consider other algorithms for choosing a preferred source.
+					beCopy.Instances = beCopy.Instances.Set(svc.Name, []BackendInstance{inst})
+					backend.Backend = beCopy
+					break
+				}
+			}
+		}
+		ans = append(ans, backend)
+	}
+	return ans
 }
 
 // idAllocator contains an internal state of the ID allocator.
