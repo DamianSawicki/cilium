@@ -75,7 +75,7 @@ var baseFrontend = Frontend{
 	nodePortAddrs: nodePortAddrs,
 }
 
-var emptyInstances part.Map[loadbalancer.ServiceName, BackendInstance]
+var emptyInstances part.Map[loadbalancer.ServiceName, []BackendInstance]
 
 var baseBackend = Backend{
 	L3n4Addr: backend1,
@@ -83,11 +83,11 @@ var baseBackend = Backend{
 	ZoneID:   0,
 	Instances: emptyInstances.Set(
 		testServiceName,
-		BackendInstance{
+		[]BackendInstance{{
 			PortName: "",
 			Weight:   0,
 			State:    loadbalancer.BackendStateActive,
-		},
+		}},
 	),
 }
 

@@ -937,11 +937,11 @@ func (ops *BPFOps) computeMaglevTable(svc *Service, bes []BackendWithRevision) (
 			return nil, fmt.Errorf("local id for address %s not found: %w", output.L3n4Addr.String(), err)
 		}
 		output.ID = loadbalancer.BackendID(id)
-		instance, ok := be.Instances.Get(svc.Name)
+		instances, ok := be.Instances.Get(svc.Name)
 		if !ok {
 			return nil, fmt.Errorf("instance of backend %q for service %q not found", be.String(), svc.Name.String())
 		}
-		output.Weight = instance.Weight
+		output.Weight = instances[0].Weight
 		backendsMap[output.String()] = output
 	}
 	var maglevTable []int = maglev.GetLookupTable(backendsMap, uint64(option.Config.MaglevTableSize))
